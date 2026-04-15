@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Water Check</h1>
+
+<div class="card" style="text-align: center;">
+    <div class="plant-name" style="font-size: 1.4rem; margin-bottom: 16px;">{{ plant.name }}</div>
+
+    {% if plant.plant_type %}
+    <div class="plant-detail" style="margin-bottom: 8px;">{{ plant.plant_type }}</div>
+    {% endif %}
+
+    <div class="plant-detail" style="margin-bottom: 24px;">
+        Watering interval: every {{ plant.watering_interval_days }} days
+    </div>
+
+    <p style="margin-bottom: 20px; font-size: 1.1rem;">Did you water this plant?</p>
+
+    <form method="POST" action="/water/{{ plant.id }}">
+        <input type="hidden" name="action" value="watered">
+        <button type="submit" class="btn btn-success" style="font-size: 1.3rem; padding: 18px;">
+            Yes, I Watered It
+        </button>
+    </form>
+
+    <form method="POST" action="/water/{{ plant.id }}">
+        <input type="hidden" name="action" value="not_watered">
+        <button type="submit" class="btn btn-warning" style="font-size: 1.3rem; padding: 18px;">
+            Not Yet
+        </button>
+    </form>
+</div>
+
+<a href="/plants" style="display: block; text-align: center; margin-top: 12px;">Back to plants</a>
+{% endblock %}

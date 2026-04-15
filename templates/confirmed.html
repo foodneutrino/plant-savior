@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Done!</h1>
+
+<div class="card" style="text-align: center;">
+    <div class="plant-name" style="font-size: 1.3rem; margin-bottom: 12px;">{{ plant.name }}</div>
+
+    {% if action == "watered" %}
+    <p style="font-size: 1.1rem; margin-bottom: 16px;">
+        Marked as watered. Next reminder on <strong>{{ next_date }}</strong>.
+    </p>
+    {% else %}
+    <p style="font-size: 1.1rem; margin-bottom: 16px;">
+        No worries! You'll be reminded again <strong>tomorrow</strong>.
+    </p>
+    {% endif %}
+</div>
+
+<a href="/plants" class="btn btn-secondary">Back to Plants</a>
+{% endblock %}

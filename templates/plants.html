@@ -1,0 +1,90 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Plant Savior</h1>
+
+{% if message %}
+<div class="flash">{{ message }}</div>
+{% endif %}
+
+<div class="card">
+    <h2>Add a Plant</h2>
+    <form method="POST" action="/plants">
+        <input type="text" name="name" placeholder="Plant name (e.g. Monstera)" required
+               id="plant-name" autocomplete="off">
+        <input type="text" name="plant_type" placeholder="Plant type (optional, for interval lookup)"
+               id="plant-type">
+        <div class="suggestion" id="suggestion"></div>
+        <input type="number" name="watering_interval_days" placeholder="Watering interval (days)"
+               min="1" max="90" id="interval-input">
+        <button type="submit" class="btn btn-primary">Add Plant</button>
+    </form>
+</div>
+
+{% if plants %}
+<h2>Your Plants</h2>
+{% for plant in plants %}
+<div class="card">
+    <div style="display: flex; justify-content: space-between; align-items: start;">
+        <div>
+            <div class="plant-name">{{ plant.name }}</div>
+            {% if plant.plant_type %}
+            <div class="plant-detail">Type: {{ plant.plant_type }}</div>
+            {% endif %}
+            <div class="plant-detail">Every {{ plant.watering_interval_days }} days</div>
+            {% if plant.next_water_date %}
+            <div class="plant-detail">Next: {{ plant.next_water_date }}</div>
+            {% endif %}
+        </div>
+        <div>
+            <a href="/water/{{ plant.id }}" class="btn btn-success" style="width: auto; padding: 8px 16px; font-size: 0.9rem; margin-bottom: 4px;">Water</a>
+            <form method="POST" action="/plants/{{ plant.id }}/delete" class="delete-form">
+                <button type="submit" class="delete-btn">Remove</button>
+            </form>
+        </div>
+    </div>
+</div>
+{% endfor %}
+{% else %}
+<div class="card">
+    <p style="color: #888; text-align: center;">No plants yet. Add one above!</p>
+</div>
+{% endif %}
+
+<script>
+    const nameInput = document.getElementById('plant-name');
+    const typeInput = document.getElementById('plant-type');
+    const intervalInput = document.getElementById('interval-input');
+    const suggestion = document.getElementById('suggestion');
+
+    let debounceTimer;
+
+    function lookupInterval(value) {
+        clearTimeout(debounceTimer);
+        debounceTimer = setTimeout(() => {
+            if (value.length < 2) {
+                suggestion.style.display = 'none';
+                return;
+            }
+            fetch(`/suggest-interval?plant_type=${encodeURIComponent(value)}`)
+                .then(r => r.json())
+                .then(data => {
+                    if (data.interval) {
+                        suggestion.textContent = `Suggested interval for "${data.match}": ${data.interval} days`;
+                        suggestion.style.display = 'block';
+                        if (!intervalInput.value) {
+                            intervalInput.value = data.interval;
+                        }
+                    } else {
+                        suggestion.style.display = 'none';
+                    }
+                });
+        }, 300);
+    }
+
+    // Look up interval from either the type field (preferred) or the name field
+    typeInput.addEventListener('input', (e) => lookupInterval(e.target.value));
+    nameInput.addEventListener('input', (e) => {
+        if (!typeInput.value) lookupInterval(e.target.value);
+    });
+</script>
+{% endblock %}

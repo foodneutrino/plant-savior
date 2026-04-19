@@ -112,3 +112,41 @@ class TestWateringLog:
     ) -> None:
         with pytest.raises(sqlite3.IntegrityError):
             repository.log_watering(9999, "watered")
+
+
+class TestCursorTransaction:
+    """``_cursor`` must not persist writes when the body raises.
+
+    Driven directly so the test does not depend on any particular
+    repository method being the failure point.
+    """
+
+    def test_body_exception_rolls_back_pending_writes(
+        self, repository: PlantRepository
+    ) -> None:
+        class _Boom(Exception):
+            pass
+
+        with pytest.raises(_Boom):
+            with repository._cursor() as conn:
+                conn.execute(
+                    "INSERT INTO plants (name, plant_type, watering_interval_days)"
+                    " VALUES (?, ?, ?)",
+                    ("Ghost", None, 7),
+                )
+                raise _Boom()
+
+        assert repository.get_all_plants() == []
+
+    def test_successful_body_commits(
+        self, repository: PlantRepository
+    ) -> None:
+        with repository._cursor() as conn:
+            conn.execute(
+                "INSERT INTO plants (name, plant_type, watering_interval_days)"
+                " VALUES (?, ?, ?)",
+                ("Persisted", None, 7),
+            )
+
+        names = [p.name for p in repository.get_all_plants()]
+        assert names == ["Persisted"]

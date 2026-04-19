@@ -26,14 +26,14 @@ _SCHEMA = """
         watering_interval_days INTEGER NOT NULL,
         calendar_event_id TEXT,
         next_water_date TEXT,
-        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
     );
 
     CREATE TABLE IF NOT EXISTS watering_log (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         plant_id INTEGER NOT NULL,
         action TEXT NOT NULL CHECK (action IN ('watered', 'skipped')),
-        logged_at TEXT NOT NULL DEFAULT (datetime('now')),
+        logged_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
         FOREIGN KEY (plant_id) REFERENCES plants(id) ON DELETE CASCADE
     );
 """

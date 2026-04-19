@@ -8,13 +8,22 @@ credentials required.
 
 from __future__ import annotations
 
+from datetime import datetime
 from unittest.mock import MagicMock
+from zoneinfo import ZoneInfo
 
 import pytest
 
 from database import PlantRepository
 from exceptions import CalendarServiceError, PlantNotFoundError
 from plant_service import PlantService
+
+_TZ = ZoneInfo("America/New_York")
+
+
+def _scheduled(event_id: str, when: datetime) -> tuple[str, datetime]:
+    """Shape matching :meth:`CalendarClient.schedule_watering`'s return."""
+    return event_id, when
 
 
 class TestAddPlant:
@@ -58,11 +67,23 @@ class TestAddPlant:
     def test_creates_calendar_event(
         self, service: PlantService, fake_calendar: MagicMock
     ) -> None:
-        fake_calendar.create_watering_event.return_value = "evt-xyz"
+        fake_calendar.schedule_watering.return_value = _scheduled(
+            "evt-xyz", datetime(2026, 5, 1, 9, 0, tzinfo=_TZ)
+        )
         result = service.add_plant("Monstera", "monstera", 7)
-        fake_calendar.create_watering_event.assert_called_once()
+
+        fake_calendar.schedule_watering.assert_called_once()
         assert result.plant.calendar_event_id == "evt-xyz"
         assert result.calendar_error is None
+        assert result.next_date is not None
+        assert result.next_date.tzinfo is not None  # must be tz-aware
+
+    def test_passes_days_from_now_to_calendar(
+        self, service: PlantService, fake_calendar: MagicMock
+    ) -> None:
+        service.add_plant("Monstera", "monstera", 10)
+        # signature: schedule_watering(plant_name, plant_id, days_from_now)
+        assert fake_calendar.schedule_watering.call_args.args[2] == 10
 
     def test_persists_plant_even_when_calendar_fails(
         self,
@@ -70,12 +91,13 @@ class TestAddPlant:
         fake_calendar: MagicMock,
         repository: PlantRepository,
     ) -> None:
-        fake_calendar.create_watering_event.side_effect = CalendarServiceError(
+        fake_calendar.schedule_watering.side_effect = CalendarServiceError(
             "api down"
         )
         result = service.add_plant("Monstera", "monstera", 7)
 
         assert result.calendar_error == "api down"
+        assert result.next_date is None
         saved = repository.get_plant(result.plant.id)
         assert saved is not None
         assert saved.calendar_event_id is None
@@ -92,7 +114,9 @@ class TestDeletePlant:
     def test_deletes_attached_calendar_event(
         self, service: PlantService, fake_calendar: MagicMock
     ) -> None:
-        fake_calendar.create_watering_event.return_value = "evt-to-delete"
+        fake_calendar.schedule_watering.return_value = _scheduled(
+            "evt-to-delete", datetime(2026, 5, 1, 9, 0, tzinfo=_TZ)
+        )
         result = service.add_plant("Monstera", None, 7)
         service.delete_plant(result.plant.id)
         fake_calendar.delete_event.assert_called_once_with("evt-to-delete")
@@ -100,7 +124,7 @@ class TestDeletePlant:
     def test_skips_calendar_call_when_no_event_attached(
         self, service: PlantService, fake_calendar: MagicMock
     ) -> None:
-        fake_calendar.create_watering_event.side_effect = CalendarServiceError(
+        fake_calendar.schedule_watering.side_effect = CalendarServiceError(
             "nope"
         )
         result = service.add_plant("Monstera", None, 7)
@@ -131,23 +155,25 @@ class TestRecordWatering:
         self, service: PlantService, fake_calendar: MagicMock
     ) -> None:
         result = service.add_plant("Monstera", None, 7)
-        fake_calendar.reschedule.reset_mock()
+        fake_calendar.schedule_watering.reset_mock()
 
         service.record_watering(result.plant.id, "watered")
 
-        days_arg = fake_calendar.reschedule.call_args.args[2]
-        assert days_arg == 7
+        # schedule_watering(plant_name, plant_id, days_from_now)
+        assert fake_calendar.schedule_watering.call_args.args[2] == 7
 
     def test_skipped_schedules_retry_days(
         self, service: PlantService, fake_calendar: MagicMock
     ) -> None:
         result = service.add_plant("Monstera", None, 7)
-        fake_calendar.reschedule.reset_mock()
+        fake_calendar.schedule_watering.reset_mock()
 
         service.record_watering(result.plant.id, "skipped")
 
-        days_arg = fake_calendar.reschedule.call_args.args[2]
-        assert days_arg == PlantService.SKIPPED_RETRY_DAYS
+        assert (
+            fake_calendar.schedule_watering.call_args.args[2]
+            == PlantService.SKIPPED_RETRY_DAYS
+        )
 
     def test_appends_to_watering_log(
         self, service: PlantService, repository: PlantRepository
@@ -166,7 +192,9 @@ class TestRecordWatering:
         repository: PlantRepository,
     ) -> None:
         result = service.add_plant("Monstera", None, 7)
-        fake_calendar.reschedule.return_value = ("evt-new", "2026-05-15")
+        fake_calendar.schedule_watering.return_value = _scheduled(
+            "evt-new", datetime(2026, 5, 15, 9, 0, tzinfo=_TZ)
+        )
 
         service.record_watering(result.plant.id, "watered")
 
@@ -175,16 +203,48 @@ class TestRecordWatering:
         assert plant.calendar_event_id == "evt-new"
         assert plant.next_water_date == "2026-05-15"
 
+    def test_deletes_old_event_after_scheduling_new(
+        self, service: PlantService, fake_calendar: MagicMock
+    ) -> None:
+        fake_calendar.schedule_watering.return_value = _scheduled(
+            "evt-old", datetime(2026, 5, 1, 9, 0, tzinfo=_TZ)
+        )
+        result = service.add_plant("Monstera", None, 7)
+        fake_calendar.schedule_watering.return_value = _scheduled(
+            "evt-new", datetime(2026, 5, 8, 9, 0, tzinfo=_TZ)
+        )
+
+        service.record_watering(result.plant.id, "watered")
+
+        fake_calendar.delete_event.assert_called_once_with("evt-old")
+
     def test_surfaces_calendar_error_without_raising(
         self, service: PlantService, fake_calendar: MagicMock
     ) -> None:
         result = service.add_plant("Monstera", None, 7)
-        fake_calendar.reschedule.side_effect = CalendarServiceError("boom")
+        fake_calendar.schedule_watering.side_effect = CalendarServiceError(
+            "boom"
+        )
 
         outcome = service.record_watering(result.plant.id, "watered")
 
         assert outcome.calendar_error == "boom"
         assert outcome.next_date == ""
+
+    def test_old_event_preserved_when_new_event_fails(
+        self, service: PlantService, fake_calendar: MagicMock
+    ) -> None:
+        """If scheduling the new event fails we must not delete the old
+        one — the user would otherwise be left with no reminder."""
+        result = service.add_plant("Monstera", None, 7)
+        fake_calendar.delete_event.reset_mock()
+        fake_calendar.schedule_watering.side_effect = CalendarServiceError(
+            "503"
+        )
+
+        service.record_watering(result.plant.id, "watered")
+
+        fake_calendar.delete_event.assert_not_called()
 
     def test_raises_for_missing_plant(self, service: PlantService) -> None:
         with pytest.raises(PlantNotFoundError):

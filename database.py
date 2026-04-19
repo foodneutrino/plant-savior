@@ -69,10 +69,19 @@ class PlantRepository:
 
     @contextmanager
     def _cursor(self) -> Iterator[sqlite3.Connection]:
+        """Yield a connection, committing on success and rolling back on error.
+
+        The explicit rollback guards against pending writes being retried
+        when the connection is re-used by a pool or a future backend that
+        does not implicitly rollback on close.
+        """
         conn = self._connect()
         try:
             yield conn
             conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
         finally:
             conn.close()
 

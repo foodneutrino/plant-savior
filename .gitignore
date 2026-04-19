@@ -4,6 +4,7 @@ __pycache__/
 .env
 token.json
 credentials.json
+claude.md
 plants.db
 *.egg-info/
 .venv/

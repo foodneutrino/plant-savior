@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import MagicMock
+from zoneinfo import ZoneInfo
 
 import pytest
 
 from calendar_service import CalendarClient
 from database import PlantRepository, sqlite_connection_factory
 from plant_service import PlantService
+
+DEFAULT_TZ = ZoneInfo("America/New_York")
 
 
 @pytest.fixture
@@ -25,15 +29,16 @@ def fake_calendar() -> MagicMock:
     """A spec'd :class:`MagicMock` replacing :class:`CalendarClient`.
 
     Default happy-path behavior:
-      * ``create_watering_event`` → ``"evt-1"``
-      * ``reschedule`` → ``("evt-2", "2026-05-01")``
+      * ``schedule_watering`` → ``("evt-1", 2026-05-01 09:00 America/New_York)``
       * ``delete_event`` is a silent no-op
 
     Tests should override per case (e.g. ``.side_effect``).
     """
     cal = MagicMock(spec=CalendarClient)
-    cal.create_watering_event.return_value = "evt-1"
-    cal.reschedule.return_value = ("evt-2", "2026-05-01")
+    cal.schedule_watering.return_value = (
+        "evt-1",
+        datetime(2026, 5, 1, 9, 0, tzinfo=DEFAULT_TZ),
+    )
     return cal
 
 

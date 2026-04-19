@@ -9,8 +9,7 @@ Google Calendar connection.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
-
+from datetime import datetime
 from typing import Any
 
 from calendar_service import CalendarClient
@@ -25,12 +24,13 @@ class AddPlantResult:
     """Outcome of :meth:`PlantService.add_plant`.
 
     The plant is always persisted; ``calendar_error`` is populated when
-    the reminder event could not be created so the caller can surface
-    a flash message.
+    the reminder event could not be created so the caller can surface a
+    flash message. ``next_date`` is ``None`` exactly when
+    ``calendar_error`` is set.
     """
 
     plant: Plant
-    next_date: datetime
+    next_date: datetime | None
     calendar_error: str | None
 
 
@@ -83,8 +83,8 @@ class PlantService:
         """Persist a new plant and attempt to create its reminder event.
 
         The plant is always saved. If the calendar insert fails, the
-        returned :class:`AddPlantResult` carries the error message so the
-        caller can surface it; the next retry can set the event later.
+        returned :class:`AddPlantResult` carries the error message so
+        the caller can surface it; a later action can set the event.
         """
         clean_name = name.strip()
         clean_type = self._clean_optional(plant_type)
@@ -93,12 +93,12 @@ class PlantService:
         )
 
         plant_id = self._repository.add_plant(clean_name, clean_type, interval)
-        next_date = datetime.now() + timedelta(days=interval)
 
+        next_date: datetime | None = None
         calendar_error: str | None = None
         try:
-            event_id = self._calendar.create_watering_event(
-                clean_name, next_date, plant_id
+            event_id, next_date = self._calendar.schedule_watering(
+                clean_name, plant_id, interval
             )
             self._repository.update_event(
                 plant_id, event_id, next_date.strftime("%Y-%m-%d")
@@ -129,6 +129,9 @@ class PlantService:
 
         A ``"watered"`` action schedules the next reminder one full
         interval out; ``"skipped"`` schedules a retry the next day.
+
+        The new event is created *before* the old one is deleted so a
+        failure mid-flight never leaves the user without a reminder.
         """
         plant = self.get_plant(plant_id)
         self._repository.log_watering(plant_id, action)
@@ -140,13 +143,21 @@ class PlantService:
         )
 
         try:
-            new_event_id, next_date = self._calendar.reschedule(
-                plant_id, plant.name, days, plant.calendar_event_id
+            event_id, new_start = self._calendar.schedule_watering(
+                plant.name, plant_id, days
             )
-            self._repository.update_event(plant_id, new_event_id, next_date)
-            return WaterResult(next_date=next_date, calendar_error=None)
         except CalendarServiceError as e:
             return WaterResult(next_date="", calendar_error=str(e))
+
+        if plant.calendar_event_id:
+            try:
+                self._calendar.delete_event(plant.calendar_event_id)
+            except CalendarServiceError:
+                pass
+
+        next_date_iso = new_start.strftime("%Y-%m-%d")
+        self._repository.update_event(plant_id, event_id, next_date_iso)
+        return WaterResult(next_date=next_date_iso, calendar_error=None)
 
     @staticmethod
     def _clean_optional(value: str | None) -> str | None:

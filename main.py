@@ -89,9 +89,10 @@ def add_plant(
     service: PlantService = Depends(get_service),
 ) -> RedirectResponse:
     result = service.add_plant(name, plant_type, watering_interval_days)
-    if result.calendar_error:
+    if result.calendar_error or result.next_date is None:
         message = (
-            f"Plant added but calendar event failed: {result.calendar_error}"
+            f"Plant added but calendar event failed: "
+            f"{result.calendar_error or 'unknown'}"
         )
     else:
         message = (

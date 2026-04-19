@@ -150,7 +150,7 @@ class PlantRepository:
         with self._cursor() as conn:
             rows = conn.execute(
                 "SELECT * FROM watering_log WHERE plant_id = ?"
-                " ORDER BY logged_at DESC LIMIT ?",
+                " ORDER BY logged_at DESC, id DESC LIMIT ?",
                 (plant_id, limit),
             ).fetchall()
         return [dict(r) for r in rows]

@@ -12,6 +12,8 @@ Run with::
 from __future__ import annotations
 
 import os
+from contextlib import asynccontextmanager
+from typing import AsyncIterator
 
 from fastapi import Depends, FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -20,10 +22,9 @@ from fastapi.templating import Jinja2Templates
 from calendar_service import CalendarClient, CalendarConfig
 from database import DEFAULT_DB_PATH, PlantRepository, sqlite_connection_factory
 from exceptions import PlantNotFoundError
-from plant_data import PLANT_INTERVALS, suggest_interval
+from plant_data import suggest_interval
 from plant_service import PlantService
 
-app = FastAPI(title="Plant Savior")
 templates = Jinja2Templates(directory="templates")
 
 _service: PlantService | None = None
@@ -37,21 +38,28 @@ def _calendar_config_from_env() -> CalendarConfig:
     )
 
 
-@app.on_event("startup")
-def startup() -> None:
-    """Initialise the database schema and the singleton service."""
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """Initialise (and tear down) application-wide singletons."""
     global _service
     repository = PlantRepository(sqlite_connection_factory(DEFAULT_DB_PATH))
     repository.init_schema()
     calendar = CalendarClient.from_credentials(_calendar_config_from_env())
     _service = PlantService(repository, calendar)
+    try:
+        yield
+    finally:
+        _service = None
+
+
+app = FastAPI(title="Plant Savior", lifespan=lifespan)
 
 
 def get_service() -> PlantService:
     """FastAPI dependency returning the initialised :class:`PlantService`."""
     if _service is None:
         raise RuntimeError(
-            "PlantService not initialised — startup event did not run"
+            "PlantService not initialised — lifespan startup did not run"
         )
     return _service
 
@@ -159,17 +167,10 @@ def handle_water_action(
 
 @app.get("/suggest-interval")
 def get_suggested_interval(plant_type: str):
-    interval = suggest_interval(plant_type)
-    if interval is None:
+    match = suggest_interval(plant_type)
+    if match is None:
         return {"interval": None, "match": None}
-
-    normalized = plant_type.strip().lower()
-    match_name = plant_type
-    for name in PLANT_INTERVALS:
-        if normalized in name or name in normalized:
-            match_name = name.title()
-            break
-    return {"interval": interval, "match": match_name}
+    return {"interval": match.interval, "match": match.match}
 
 
 @app.get("/history/{plant_id}", response_class=HTMLResponse)
@@ -179,16 +180,13 @@ def plant_history(
     service: PlantService = Depends(get_service),
 ):
     try:
-        service.get_plant(plant_id)
+        plant = service.get_plant(plant_id)
+        history = service.get_history(plant_id)
     except PlantNotFoundError:
         return RedirectResponse(
             url="/plants?message=Plant not found", status_code=303
         )
     return templates.TemplateResponse(
-        "plants.html",
-        {
-            "request": request,
-            "plants": service.list_plants(),
-            "message": "",
-        },
+        "history.html",
+        {"request": request, "plant": plant, "history": history},
     )

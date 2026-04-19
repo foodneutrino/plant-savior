@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Watering History</h1>
+
+<div class="card">
+    <div class="plant-name">{{ plant.name }}</div>
+    {% if plant.plant_type %}
+    <div class="plant-detail">{{ plant.plant_type }}</div>
+    {% endif %}
+    <div class="plant-detail">Every {{ plant.watering_interval_days }} days</div>
+    {% if plant.next_water_date %}
+    <div class="plant-detail">Next: {{ plant.next_water_date }}</div>
+    {% endif %}
+</div>
+
+<div class="card">
+    <h2>Recent Entries</h2>
+    {% if history %}
+        {% for entry in history %}
+        <div class="history-item">
+            <strong>{{ entry.action|capitalize }}</strong>
+            <span style="color: #666;"> — {{ entry.logged_at }}</span>
+        </div>
+        {% endfor %}
+    {% else %}
+    <p style="color: #888;">No watering events recorded yet.</p>
+    {% endif %}
+</div>
+
+<a href="/plants" style="display: block; text-align: center; margin-top: 12px;">Back to plants</a>
+{% endblock %}

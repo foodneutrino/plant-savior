@@ -11,6 +11,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
+from typing import Any
+
 from calendar_service import CalendarClient
 from database import PlantRepository
 from exceptions import CalendarServiceError, PlantNotFoundError
@@ -54,6 +56,16 @@ class PlantService:
 
     def list_plants(self) -> list[Plant]:
         return self._repository.get_all_plants()
+
+    def get_history(
+        self, plant_id: int, limit: int = 20
+    ) -> list[dict[str, Any]]:
+        """Return recent watering log entries for the given plant.
+
+        Raises :class:`PlantNotFoundError` if the plant does not exist.
+        """
+        self.get_plant(plant_id)  # existence check
+        return self._repository.get_watering_history(plant_id, limit=limit)
 
     def get_plant(self, plant_id: int) -> Plant:
         """Return a plant or raise :class:`PlantNotFoundError`."""
@@ -145,4 +157,5 @@ class PlantService:
 
     @classmethod
     def _suggest_or_default(cls, lookup: str) -> int:
-        return suggest_interval(lookup) or cls.DEFAULT_INTERVAL_DAYS
+        match = suggest_interval(lookup)
+        return match.interval if match else cls.DEFAULT_INTERVAL_DAYS

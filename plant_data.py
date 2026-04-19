@@ -1,10 +1,11 @@
 """Default watering intervals for common houseplants.
 
-Intervals are approximate days between waterings, assuming typical indoor
-conditions (indirect light, room temperature, moderate humidity).
+Intervals are approximate days between waterings, assuming typical
+indoor conditions (indirect light, room temperature, moderate humidity).
 """
 
-# Values are watering interval in days
+from dataclasses import dataclass
+
 PLANT_INTERVALS: dict[str, int] = {
     "aloe vera": 14,
     "basil": 3,
@@ -39,20 +40,43 @@ PLANT_INTERVALS: dict[str, int] = {
 }
 
 
-def suggest_interval(plant_type: str) -> int | None:
+@dataclass(frozen=True)
+class IntervalMatch:
+    """Result of a plant-name lookup against :data:`PLANT_INTERVALS`.
+
+    Attributes:
+        interval: Suggested watering interval in days.
+        match: Title-cased display name of the matched entry (e.g.
+            ``"Snake Plant"`` when the caller typed ``"snake"``).
+    """
+
+    interval: int
+    match: str
+
+
+def suggest_interval(plant_type: str) -> IntervalMatch | None:
     """Look up a default watering interval by plant name.
 
-    Performs case-insensitive matching. Returns None if not found.
+    Matching is case-insensitive and falls back to substring matching,
+    so ``"snake"`` finds ``"snake plant"``. Returns ``None`` when no
+    entry resembles the input.
+
+    Args:
+        plant_type: User-provided species or common name.
+
+    Returns:
+        An :class:`IntervalMatch` on success, or ``None`` if no entry
+        matched.
     """
     normalized = plant_type.strip().lower()
+    if not normalized:
+        return None
 
-    # Exact match
     if normalized in PLANT_INTERVALS:
-        return PLANT_INTERVALS[normalized]
+        return IntervalMatch(PLANT_INTERVALS[normalized], normalized.title())
 
-    # Substring match (e.g. "snake" matches "snake plant")
     for name, days in PLANT_INTERVALS.items():
         if normalized in name or name in normalized:
-            return days
+            return IntervalMatch(days, name.title())
 
     return None

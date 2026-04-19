@@ -1,103 +1,168 @@
-"""SQLite database for plant and watering log storage."""
+"""SQLite persistence layer for plants and watering history.
+
+The :class:`PlantRepository` accepts a connection factory rather than a
+hard-coded path so tests can point it at a temporary database without
+monkey-patching module globals.
+"""
+
+from __future__ import annotations
 
 import sqlite3
-from datetime import datetime
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Any, Callable, Iterator
 
-DB_PATH = Path(__file__).parent / "plants.db"
+from models import Plant, WaterActionType
 
+DEFAULT_DB_PATH = Path(__file__).parent / "plants.db"
 
-def get_connection() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
-    return conn
+ConnectionFactory = Callable[[], sqlite3.Connection]
 
+_SCHEMA = """
+    CREATE TABLE IF NOT EXISTS plants (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        plant_type TEXT,
+        watering_interval_days INTEGER NOT NULL,
+        calendar_event_id TEXT,
+        next_water_date TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
 
-def init_db():
-    """Create tables if they don't exist."""
-    conn = get_connection()
-    conn.executescript("""
-        CREATE TABLE IF NOT EXISTS plants (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL,
-            plant_type TEXT,
-            watering_interval_days INTEGER NOT NULL,
-            calendar_event_id TEXT,
-            next_water_date TEXT,
-            created_at TEXT NOT NULL DEFAULT (datetime('now'))
-        );
-
-        CREATE TABLE IF NOT EXISTS watering_log (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            plant_id INTEGER NOT NULL,
-            action TEXT NOT NULL CHECK (action IN ('watered', 'skipped')),
-            logged_at TEXT NOT NULL DEFAULT (datetime('now')),
-            FOREIGN KEY (plant_id) REFERENCES plants(id) ON DELETE CASCADE
-        );
-    """)
-    conn.commit()
-    conn.close()
+    CREATE TABLE IF NOT EXISTS watering_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        plant_id INTEGER NOT NULL,
+        action TEXT NOT NULL CHECK (action IN ('watered', 'skipped')),
+        logged_at TEXT NOT NULL DEFAULT (datetime('now')),
+        FOREIGN KEY (plant_id) REFERENCES plants(id) ON DELETE CASCADE
+    );
+"""
 
 
-def add_plant(name: str, plant_type: str | None, watering_interval_days: int) -> int:
-    conn = get_connection()
-    cursor = conn.execute(
-        "INSERT INTO plants (name, plant_type, watering_interval_days) VALUES (?, ?, ?)",
-        (name, plant_type, watering_interval_days),
+def sqlite_connection_factory(db_path: Path | str) -> ConnectionFactory:
+    """Return a factory that opens fresh SQLite connections to ``db_path``.
+
+    Each returned connection has ``Row`` row factory enabled and foreign-key
+    constraints turned on.
+    """
+    path_str = str(db_path)
+
+    def factory() -> sqlite3.Connection:
+        conn = sqlite3.connect(path_str)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        return conn
+
+    return factory
+
+
+class PlantRepository:
+    """CRUD operations for plants and their watering log.
+
+    Args:
+        connection_factory: Callable returning a new SQLite connection on
+            each invocation. Enables dependency injection for tests.
+    """
+
+    def __init__(self, connection_factory: ConnectionFactory) -> None:
+        self._connect = connection_factory
+
+    @contextmanager
+    def _cursor(self) -> Iterator[sqlite3.Connection]:
+        """Yield a connection, committing on success and rolling back on error.
+
+        The explicit rollback guards against pending writes being retried
+        when the connection is re-used by a pool or a future backend that
+        does not implicitly rollback on close.
+        """
+        conn = self._connect()
+        try:
+            yield conn
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
+    def init_schema(self) -> None:
+        """Create the ``plants`` and ``watering_log`` tables if absent."""
+        with self._cursor() as conn:
+            conn.executescript(_SCHEMA)
+
+    def add_plant(
+        self,
+        name: str,
+        plant_type: str | None,
+        watering_interval_days: int,
+    ) -> int:
+        """Insert a new plant and return its generated ID."""
+        with self._cursor() as conn:
+            cursor = conn.execute(
+                "INSERT INTO plants (name, plant_type, watering_interval_days)"
+                " VALUES (?, ?, ?)",
+                (name, plant_type, watering_interval_days),
+            )
+            return cursor.lastrowid  # type: ignore[return-value]
+
+    def get_plant(self, plant_id: int) -> Plant | None:
+        """Return the plant with the given ID, or ``None`` if not found."""
+        with self._cursor() as conn:
+            row = conn.execute(
+                "SELECT * FROM plants WHERE id = ?", (plant_id,)
+            ).fetchone()
+        return _row_to_plant(row) if row else None
+
+    def get_all_plants(self) -> list[Plant]:
+        """Return every plant ordered by name."""
+        with self._cursor() as conn:
+            rows = conn.execute("SELECT * FROM plants ORDER BY name").fetchall()
+        return [_row_to_plant(r) for r in rows]
+
+    def update_event(
+        self, plant_id: int, event_id: str, next_water_date: str
+    ) -> None:
+        """Attach a newly created calendar event to an existing plant."""
+        with self._cursor() as conn:
+            conn.execute(
+                "UPDATE plants SET calendar_event_id = ?, next_water_date = ?"
+                " WHERE id = ?",
+                (event_id, next_water_date, plant_id),
+            )
+
+    def delete_plant(self, plant_id: int) -> None:
+        """Remove the plant and cascade-delete its watering log."""
+        with self._cursor() as conn:
+            conn.execute("DELETE FROM plants WHERE id = ?", (plant_id,))
+
+    def log_watering(self, plant_id: int, action: WaterActionType) -> None:
+        """Append a watered/skipped entry to the plant's log."""
+        with self._cursor() as conn:
+            conn.execute(
+                "INSERT INTO watering_log (plant_id, action) VALUES (?, ?)",
+                (plant_id, action),
+            )
+
+    def get_watering_history(
+        self, plant_id: int, limit: int = 10
+    ) -> list[dict[str, Any]]:
+        """Return recent watering log entries for a plant, newest first."""
+        with self._cursor() as conn:
+            rows = conn.execute(
+                "SELECT * FROM watering_log WHERE plant_id = ?"
+                " ORDER BY logged_at DESC LIMIT ?",
+                (plant_id, limit),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def _row_to_plant(row: sqlite3.Row) -> Plant:
+    return Plant(
+        id=row["id"],
+        name=row["name"],
+        plant_type=row["plant_type"],
+        watering_interval_days=row["watering_interval_days"],
+        calendar_event_id=row["calendar_event_id"],
+        next_water_date=row["next_water_date"],
+        created_at=row["created_at"],
     )
-    plant_id = cursor.lastrowid
-    conn.commit()
-    conn.close()
-    return plant_id
-
-
-def get_plant(plant_id: int) -> dict | None:
-    conn = get_connection()
-    row = conn.execute("SELECT * FROM plants WHERE id = ?", (plant_id,)).fetchone()
-    conn.close()
-    return dict(row) if row else None
-
-
-def get_all_plants() -> list[dict]:
-    conn = get_connection()
-    rows = conn.execute("SELECT * FROM plants ORDER BY name").fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
-
-
-def update_plant_event(plant_id: int, event_id: str, next_water_date: str):
-    conn = get_connection()
-    conn.execute(
-        "UPDATE plants SET calendar_event_id = ?, next_water_date = ? WHERE id = ?",
-        (event_id, next_water_date, plant_id),
-    )
-    conn.commit()
-    conn.close()
-
-
-def delete_plant(plant_id: int):
-    conn = get_connection()
-    conn.execute("DELETE FROM plants WHERE id = ?", (plant_id,))
-    conn.commit()
-    conn.close()
-
-
-def log_watering(plant_id: int, action: str):
-    conn = get_connection()
-    conn.execute(
-        "INSERT INTO watering_log (plant_id, action) VALUES (?, ?)",
-        (plant_id, action),
-    )
-    conn.commit()
-    conn.close()
-
-
-def get_watering_history(plant_id: int, limit: int = 10) -> list[dict]:
-    conn = get_connection()
-    rows = conn.execute(
-        "SELECT * FROM watering_log WHERE plant_id = ? ORDER BY logged_at DESC LIMIT ?",
-        (plant_id, limit),
-    ).fetchall()
-    conn.close()
-    return [dict(r) for r in rows]

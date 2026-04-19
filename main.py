@@ -1,38 +1,75 @@
-"""Plant Savior - Watering reminder app powered by Google Calendar.
+"""Plant Savior HTTP entry point.
 
-Run with: uvicorn main:app --host 0.0.0.0 --port 8000
+This module is deliberately thin: every route parses input, delegates
+to :class:`plant_service.PlantService`, and renders a response. All
+business logic lives in the service layer.
+
+Run with::
+
+    uvicorn main:app --host 0.0.0.0 --port 8000
 """
 
-from datetime import datetime, timedelta
+from __future__ import annotations
 
-from fastapi import FastAPI, Form, Request
+import os
+
+from fastapi import Depends, FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
-import database as db
-import calendar_service as cal
-from plant_data import suggest_interval
+from calendar_service import CalendarClient, CalendarConfig
+from database import DEFAULT_DB_PATH, PlantRepository, sqlite_connection_factory
+from exceptions import PlantNotFoundError
+from plant_data import PLANT_INTERVALS, suggest_interval
+from plant_service import PlantService
 
 app = FastAPI(title="Plant Savior")
 templates = Jinja2Templates(directory="templates")
 
+_service: PlantService | None = None
+
+
+def _calendar_config_from_env() -> CalendarConfig:
+    return CalendarConfig(
+        calendar_id=os.getenv("CALENDAR_ID", "primary"),
+        base_url=os.getenv("BASE_URL", "http://localhost:8000"),
+        reminder_hour=int(os.getenv("REMINDER_HOUR", "9")),
+    )
+
 
 @app.on_event("startup")
-def startup():
-    db.init_db()
+def startup() -> None:
+    """Initialise the database schema and the singleton service."""
+    global _service
+    repository = PlantRepository(sqlite_connection_factory(DEFAULT_DB_PATH))
+    repository.init_schema()
+    calendar = CalendarClient.from_credentials(_calendar_config_from_env())
+    _service = PlantService(repository, calendar)
+
+
+def get_service() -> PlantService:
+    """FastAPI dependency returning the initialised :class:`PlantService`."""
+    if _service is None:
+        raise RuntimeError(
+            "PlantService not initialised — startup event did not run"
+        )
+    return _service
 
 
 @app.get("/", response_class=RedirectResponse)
-def root():
+def root() -> RedirectResponse:
     return RedirectResponse(url="/plants")
 
 
 @app.get("/plants", response_class=HTMLResponse)
-def list_plants(request: Request, message: str = ""):
-    plants = db.get_all_plants()
+def list_plants(
+    request: Request,
+    message: str = "",
+    service: PlantService = Depends(get_service),
+):
     return templates.TemplateResponse(
         "plants.html",
-        {"request": request, "plants": plants, "message": message},
+        {"request": request, "plants": service.list_plants(), "message": message},
     )
 
 
@@ -40,92 +77,82 @@ def list_plants(request: Request, message: str = ""):
 def add_plant(
     name: str = Form(...),
     plant_type: str = Form(""),
-    watering_interval_days: int = Form(None),
-):
-    # Use suggested interval if none provided
-    if not watering_interval_days:
-        lookup = plant_type or name
-        watering_interval_days = suggest_interval(lookup) or 7
-
-    plant_type_val = plant_type.strip() if plant_type.strip() else None
-    plant_id = db.add_plant(name.strip(), plant_type_val, watering_interval_days)
-
-    # Create the first calendar event
-    next_date = datetime.now() + timedelta(days=watering_interval_days)
-    try:
-        event_id = cal.create_watering_event(name.strip(), next_date, plant_id)
-        db.update_plant_event(plant_id, event_id, next_date.strftime("%Y-%m-%d"))
-    except Exception as e:
-        # Plant is saved even if calendar fails — user can retry
-        return RedirectResponse(
-            url=f"/plants?message=Plant added but calendar event failed: {e}",
-            status_code=303,
+    watering_interval_days: int | None = Form(None),
+    service: PlantService = Depends(get_service),
+) -> RedirectResponse:
+    result = service.add_plant(name, plant_type, watering_interval_days)
+    if result.calendar_error:
+        message = (
+            f"Plant added but calendar event failed: {result.calendar_error}"
         )
-
-    return RedirectResponse(
-        url=f"/plants?message=Added {name} — next watering on {next_date.strftime('%b %d')}",
-        status_code=303,
-    )
+    else:
+        message = (
+            f"Added {result.plant.name} — "
+            f"next watering on {result.next_date.strftime('%b %d')}"
+        )
+    return RedirectResponse(url=f"/plants?message={message}", status_code=303)
 
 
 @app.post("/plants/{plant_id}/delete", response_class=RedirectResponse)
-def remove_plant(plant_id: int):
-    plant = db.get_plant(plant_id)
-    if plant and plant["calendar_event_id"]:
-        try:
-            cal.delete_event(plant["calendar_event_id"])
-        except Exception:
-            pass
-    db.delete_plant(plant_id)
+def remove_plant(
+    plant_id: int,
+    service: PlantService = Depends(get_service),
+) -> RedirectResponse:
+    try:
+        service.delete_plant(plant_id)
+    except PlantNotFoundError:
+        return RedirectResponse(
+            url="/plants?message=Plant not found", status_code=303
+        )
     return RedirectResponse(url="/plants?message=Plant removed", status_code=303)
 
 
 @app.get("/water/{plant_id}", response_class=HTMLResponse)
-def water_page(request: Request, plant_id: int):
-    plant = db.get_plant(plant_id)
-    if not plant:
-        return RedirectResponse(url="/plants?message=Plant not found")
+def water_page(
+    request: Request,
+    plant_id: int,
+    service: PlantService = Depends(get_service),
+):
+    try:
+        plant = service.get_plant(plant_id)
+    except PlantNotFoundError:
+        return RedirectResponse(
+            url="/plants?message=Plant not found", status_code=303
+        )
     return templates.TemplateResponse(
         "water.html", {"request": request, "plant": plant}
     )
 
 
 @app.post("/water/{plant_id}", response_class=HTMLResponse)
-def handle_water_action(request: Request, plant_id: int, action: str = Form(...)):
-    plant = db.get_plant(plant_id)
-    if not plant:
-        return RedirectResponse(url="/plants?message=Plant not found")
-
-    if action == "watered":
-        db.log_watering(plant_id, "watered")
-        days = plant["watering_interval_days"]
-    else:
-        db.log_watering(plant_id, "skipped")
-        days = 1
-
+def handle_water_action(
+    request: Request,
+    plant_id: int,
+    action: str = Form(...),
+    service: PlantService = Depends(get_service),
+):
+    if action not in ("watered", "skipped"):
+        raise HTTPException(status_code=400, detail="invalid action")
     try:
-        new_event_id, next_date = cal.reschedule_watering(
-            plant_id, plant["name"], days, plant["calendar_event_id"]
-        )
-        db.update_plant_event(plant_id, new_event_id, next_date)
-    except Exception as e:
-        return templates.TemplateResponse(
-            "confirmed.html",
-            {
-                "request": request,
-                "plant": plant,
-                "action": action,
-                "next_date": f"(calendar error: {e})",
-            },
+        plant = service.get_plant(plant_id)
+    except PlantNotFoundError:
+        return RedirectResponse(
+            url="/plants?message=Plant not found", status_code=303
         )
 
+    result = service.record_watering(plant_id, action)
+    next_date_display = (
+        f"(calendar error: {result.calendar_error})"
+        if result.calendar_error
+        else result.next_date
+    )
     return templates.TemplateResponse(
         "confirmed.html",
         {
             "request": request,
             "plant": plant,
             "action": action,
-            "next_date": next_date,
+            "next_date": next_date_display,
         },
     )
 
@@ -133,26 +160,35 @@ def handle_water_action(request: Request, plant_id: int, action: str = Form(...)
 @app.get("/suggest-interval")
 def get_suggested_interval(plant_type: str):
     interval = suggest_interval(plant_type)
-    if interval:
-        # Find the matched name for display
-        normalized = plant_type.strip().lower()
-        from plant_data import PLANT_INTERVALS
-        match_name = plant_type
-        for name in PLANT_INTERVALS:
-            if normalized in name or name in normalized:
-                match_name = name.title()
-                break
-        return {"interval": interval, "match": match_name}
-    return {"interval": None, "match": None}
+    if interval is None:
+        return {"interval": None, "match": None}
+
+    normalized = plant_type.strip().lower()
+    match_name = plant_type
+    for name in PLANT_INTERVALS:
+        if normalized in name or name in normalized:
+            match_name = name.title()
+            break
+    return {"interval": interval, "match": match_name}
 
 
 @app.get("/history/{plant_id}", response_class=HTMLResponse)
-def plant_history(request: Request, plant_id: int):
-    plant = db.get_plant(plant_id)
-    if not plant:
-        return RedirectResponse(url="/plants?message=Plant not found")
-    history = db.get_watering_history(plant_id, limit=20)
+def plant_history(
+    request: Request,
+    plant_id: int,
+    service: PlantService = Depends(get_service),
+):
+    try:
+        service.get_plant(plant_id)
+    except PlantNotFoundError:
+        return RedirectResponse(
+            url="/plants?message=Plant not found", status_code=303
+        )
     return templates.TemplateResponse(
         "plants.html",
-        {"request": request, "plants": db.get_all_plants(), "message": ""},
+        {
+            "request": request,
+            "plants": service.list_plants(),
+            "message": "",
+        },
     )
